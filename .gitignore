@@ -1,0 +1,5 @@
+models/_build/
+__pycache__/
+*.pt
+# целиком не влезает в GitHub — в репозиторий идут части .partNN
+models/lama_fp32.onnx

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Фото-Ластик">
+<meta name="theme-color" content="#14161b">
+<title>Фото-Ластик</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<style>
+  :root { --bg:#14161b; --panel:#1d2027; --line:#2c303a; --text:#f2f3f5; --muted:#9aa0ac; --accent:#ffb020; --danger:#ff453a; --ok:#32d74b; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font:16px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overscroll-behavior:none; }
+  body { display:flex; flex-direction:column; height:100dvh; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+  header { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--line); min-height:48px; }
+  header h1 { font-size:17px; margin:0; font-weight:650; }
+  #status { flex:1; font-size:13px; color:var(--muted); text-align:right; overflow:hidden; }
+  #status.err { color:var(--danger); } #status.ok { color:var(--ok); }
+  #gear { border:0; background:#2b2f3a; color:var(--text); width:36px; height:36px; border-radius:10px; font-size:18px; }
+  #settings { display:none; background:var(--panel); border-bottom:1px solid var(--line); padding:6px 14px 10px; }
+  #settings.on { display:block; }
+  #settings label { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 0; font-size:15px; border-bottom:1px solid var(--line); }
+  #settings label:last-of-type { border-bottom:0; }
+  #settings small { display:block; color:var(--muted); font-size:12px; }
+  #settings input { width:22px; height:22px; accent-color:var(--accent); flex:none; }
+  #engine { font-size:12px; color:var(--muted); padding-top:6px; }
+  #stage { position:relative; flex:1; min-height:0; overflow:hidden; touch-action:none; background:#0d0e12; }
+  #wrap { position:absolute; left:0; top:0; transform-origin:0 0; will-change:transform; }
+  #wrap canvas, #wrap img { position:absolute; left:0; top:0; width:100%; height:100%; display:block; }
+  #wrap #orig { display:none; pointer-events:none; }
+  #wrap #orig.on { display:block; }
+  #mask { opacity:.55; pointer-events:none; }
+  #origTag { position:absolute; left:10px; top:10px; background:rgba(0,0,0,.6); padding:4px 10px; border-radius:8px; font-size:13px; display:none; }
+  #origTag.on { display:block; }
+  #empty { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--muted); text-align:center; padding:24px; }
+  #empty b { color:var(--text); font-size:18px; }
+  #progress { position:absolute; left:0; right:0; top:0; height:3px; z-index:3; }
+  #progress i { display:block; height:100%; width:0; background:var(--accent); transition:width .2s; }
+  #busy { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.45); font-weight:600; text-align:center; padding:24px; z-index:4; }
+  #busy.on { display:flex; }
+  #strip { display:flex; gap:8px; overflow-x:auto; padding:8px 12px; border-top:1px solid var(--line); background:var(--panel); }
+  #strip:empty { display:none; }
+  #strip button { position:relative; flex:0 0 auto; width:54px; height:54px; border-radius:8px; border:2px solid transparent; padding:0; background:#000 center/cover no-repeat; }
+  #strip button.cur { border-color:var(--accent); }
+  #strip button.done::after { content:"✓"; position:absolute; right:3px; bottom:1px; color:var(--ok); font-weight:800; text-shadow:0 0 3px #000; }
+  #tools { background:var(--panel); border-top:1px solid var(--line); padding:10px 12px 12px; display:flex; flex-direction:column; gap:10px; }
+  .row { display:flex; gap:8px; }
+  button.b { flex:1; border:0; border-radius:12px; padding:13px 2px; font-size:14px; font-weight:600; color:var(--text); background:#2b2f3a; touch-action:manipulation; }
+  button.b:active { filter:brightness(1.25); }
+  button.b.main { background:var(--accent); color:#1a1300; }
+  button.b.on { outline:2px solid var(--accent); background:#3a3320; }
+  button.b[disabled] { opacity:.4; }
+  .sizeRow { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; }
+  .sizeRow input { flex:1; accent-color:var(--accent); }
+  #brushTools { display:none; flex-direction:column; gap:10px; }
+  #brushTools.on { display:flex; }
+  #hint { font-size:12px; color:var(--muted); text-align:center; }
+  #log { display:none; font:11px/1.3 ui-monospace,Menlo,monospace; color:var(--muted); max-height:90px; overflow:auto; white-space:pre-wrap; user-select:text; -webkit-user-select:text; }
+  #log.on { display:block; }
+  #file { display:none; }
+  #groupsBox { padding:9px 0; border-bottom:1px solid var(--line); }
+  #groupsBox .gt { font-size:15px; margin-bottom:8px; }
+  #groups { display:flex; flex-wrap:wrap; gap:6px; }
+  #groups label { display:inline-flex; padding:6px 10px; border:1px solid var(--line); border-radius:16px; font-size:13px; gap:6px; }
+  #groups input { width:16px; height:16px; }
+  #dets { pointer-events:none; }
+  #stop { margin-top:14px; border:0; border-radius:10px; padding:10px 20px; background:#3a3f4b; color:var(--text); font-weight:600; display:none; }
+  #stop.on { display:inline-block; }
+  #busy > div { display:flex; flex-direction:column; align-items:center; }
+
+</style>
+</head>
+<body>
+<header>
+  <h1>Фото-Ластик</h1>
+  <div id="status">Выберите фото</div>
+  <button id="gear" aria-label="Настройки">⚙</button>
+</header>
+<div id="settings">
+  <label><span>Улучшать при добавлении<small>Свет и цвет сразу, без нажатий</small></span><input type="checkbox" id="optEnh"></label>
+  <label><span>Стирать сразу после мазка<small>Отпустили палец — через секунду стирается</small></span><input type="checkbox" id="optErase"></label>
+  <label><span>Полностью автоматически<small>При добавлении: улучшить, найти и стереть лишнее без нажатий</small></span><input type="checkbox" id="optFull"></label>
+  <div id="groupsBox"><div class="gt">Что убирать автоматически</div><div id="groups"></div></div>
+  <button class="b" id="autoAll" style="width:100%;margin:6px 0 4px" disabled>Авто-уборка всех фото сейчас</button>
+  <label><span>Ускорение видеокартой (тест)<small>Если будут ошибки — выключите</small></span><input type="checkbox" id="optGpu"></label>
+  <div id="engine">Движок: ещё не загружен</div>
+</div>
+
+<div id="stage">
+  <div id="progress"><i></i></div>
+  <div id="wrap"><img id="orig" alt=""><canvas id="mask"></canvas><canvas id="dets"></canvas></div>
+  <div id="origTag">Оригинал</div>
+  <div id="empty">
+    <b>Подготовка фото для рекламы</b>
+    <span>Свет и цвет улучшаются сами.<br>Лишнее убирается автоматически или кистью.<br>Всё считается на телефоне, фото никуда не уходят.</span>
+    <button class="b main" id="pick0" style="flex:none;padding:14px 26px">Выбрать фото</button>
+  </div>
+  <div id="busy"><div><span id="busyText">Работаю…</span><button id="stop">Остановить</button></div></div>
+</div>
+
+<div id="strip"></div>
+
+<div id="tools">
+  <div id="brushTools">
+    <div class="sizeRow"><span>Кисть</span><input id="size" type="range" min="12" max="110" value="40"><span id="sizeVal">40</span></div>
+    <div class="row">
+      <button class="b main" id="doErase">Стереть</button>
+      <button class="b" id="clearMask">Сбросить мазки</button>
+    </div>
+    <div id="hint">Закрашивайте с запасом. Тап по рамке — не убирать этот предмет. Двумя пальцами — приблизить, двойной тап — весь кадр</div>
+  </div>
+  <div class="row">
+    <button class="b" id="add">+ Фото</button>
+    <button class="b" id="brush" disabled>Кисть</button>
+    <button class="b" id="auto" disabled>Авто</button>
+    <button class="b" id="cmp" disabled>До/после</button>
+    <button class="b" id="undo" disabled>Отмена</button>
+  </div>
+  <div class="row">
+    <button class="b" id="enh" disabled>Улучшить</button>
+    <button class="b main" id="save" disabled>Сохранить</button>
+    <button class="b" id="saveAll" disabled>Сохранить все</button>
+  </div>
+  <div id="log"></div>
+</div>
+<input id="file" type="file" accept="image/*" multiple>
+<script src="app.js"></script>
+</body>
+</html>
