@@ -33,13 +33,14 @@ const store = {
 const S = {
   photos: [], cur: -1, mode: 'view', zoom: 1, px: 0, py: 0, fit: 1, ox: 0, oy: 0, busy: false,
   sess: null, sessP: null, engine: '',
-  brush: store.get('brush', 40), autoEnh: store.get('autoEnh', true), autoErase: store.get('autoErase', true), gpu: store.get('gpu', false) || Q.has('gpu'),
+  brush: store.get('brush', 40), autoEnh: store.get('autoEnh', true), autoErase: store.get('autoErase2', false), gpu: store.get('gpu', false) || Q.has('gpu'),
   fullAuto: store.get('fullAuto', false), groups: store.get('groups', GROUPS.map((g) => g.id)), det: null, detP: null, cancel: false,
 };
 
 /* ---------- служебное ---------- */
-function log(...a) { const el = $('log'); el.classList.add('on'); el.textContent += a.join(' ') + '\n'; el.scrollTop = 1e9; }
-function status(t, cls) { const s = $('status'); s.textContent = t; s.className = cls || ''; }
+function log(...a) { const el = $('log'); el.textContent += a.join(' ') + '\n'; el.scrollTop = 1e9; }
+// журнал показываем только при ошибке — его текст пригодится для разбора
+function status(t, cls) { const s = $('status'); s.textContent = t; s.className = cls || ''; if (cls === 'err') $('log').classList.add('on'); }
 function progress(p) { document.querySelector('#progress i').style.width = (clamp(p, 0, 1) * 100) + '%'; }
 const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
 let busyTimer = null;
@@ -125,6 +126,7 @@ function select(i) {
   [...wrap.querySelectorAll('canvas:not(#mask):not(#dets)')].forEach((c) => c.remove());
   wrap.insertBefore(p.canvas, origImg);
   origImg.src = p.origURL;
+  strokes = []; strokeRedo = [];
   maskCv.width = manCv.width = detCv.width = p.canvas.width; maskCv.height = manCv.height = detCv.height = p.canvas.height;
   renderMask();
   $('empty').style.display = 'none';
@@ -151,6 +153,7 @@ window.addEventListener('resize', () => { if (cur()) fitView(); });
 
 /* ---------- кисть ---------- */
 const ptrs = new Map(); let stroke = null, pinch = null, eraseTimer = null, lastTap = 0;
+let strokes = [], strokeRedo = [];   // мазки текущего выделения: можно убирать и возвращать по одному
 function toImg(e) {
   const r = wrap.getBoundingClientRect(), p = cur();
   return { x: (e.clientX - r.left) / r.width * p.canvas.width, y: (e.clientY - r.top) / r.height * p.canvas.height, k: p.canvas.width / r.width };
@@ -165,7 +168,7 @@ stage.addEventListener('pointerdown', (e) => {
   if (ptrs.size === 1 && S.mode === 'brush') {
     const q = toImg(e), hit = detAt(q.x, q.y);
     if (hit) { stroke = { toggle: hit, moved: false, x: q.x, y: q.y, lx: q.x, ly: q.y, r: 0, t: Date.now() }; return; }
-    stroke = { lx: q.x, ly: q.y, x: q.x, y: q.y, r: S.brush / 2 * q.k, moved: false, t: Date.now() };
+    stroke = { lx: q.x, ly: q.y, x: q.x, y: q.y, r: S.brush / 2 * q.k, moved: false, t: Date.now(), pts: [[q.x, q.y]] };
     for (const c of [maskCv.getContext('2d'), manCv.getContext('2d')]) { c.fillStyle = '#ff2d2d'; c.beginPath(); c.arc(q.x, q.y, S.brush / 2 * q.k, 0, 7); c.fill(); }
   }
 });
@@ -186,7 +189,7 @@ stage.addEventListener('pointermove', (e) => {
       c.strokeStyle = '#ff2d2d'; c.lineCap = 'round'; c.lineJoin = 'round'; c.lineWidth = S.brush * q.k;
       c.beginPath(); c.moveTo(stroke.lx, stroke.ly); c.lineTo(q.x, q.y); c.stroke();
     }
-    stroke.lx = q.x; stroke.ly = q.y; stroke.moved = true;
+    stroke.lx = q.x; stroke.ly = q.y; stroke.moved = true; stroke.pts.push([q.x, q.y]);
   } else if (S.mode === 'view' && ptrs.size === 1 && S.zoom > 1 && e.movementX !== undefined) {
     S.px += e.movementX; S.py += e.movementY; applyView();
   }
@@ -204,27 +207,34 @@ function endPtr(e) {
       stroke = null; lastTap = 0; return;
     }
     const isDot = !stroke || !stroke.moved;
-    if (stroke && !stroke.moved) { dots.push(stroke); if (dots.length > 2) dots.shift(); }
-    if (!wasPinch && isDot && now - lastTap < 320) { lastTap = 0; eraseDots(); fitView(); stroke = null; return; }
+    if (stroke) { strokes.push({ r: stroke.r, pts: stroke.pts, t: stroke.t, dot: !stroke.moved }); strokeRedo = []; }
+    if (!wasPinch && isDot && now - lastTap < 320) { lastTap = 0; eraseDots(); fitView(); stroke = null; updateButtons(); return; }
     lastTap = isDot && !wasPinch ? now : 0;
-    if (stroke) scheduleAutoErase();
-    stroke = null;
+    if (stroke) { scheduleAutoErase(); if (!S.autoErase) status('Выделено. Можно добавить ещё или нажать «Удалить»'); }
+    stroke = null; updateButtons();
   }
 }
 stage.addEventListener('pointerup', endPtr); stage.addEventListener('pointercancel', endPtr);
 stage.addEventListener('wheel', (e) => { e.preventDefault(); const r = stage.getBoundingClientRect(); zoomAt(e.clientX - r.left, e.clientY - r.top, S.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)); }, { passive: false });
 
-// точки от двойного тапа (тап-тап = «весь кадр») убираем из маски
-let dots = [];
+// точки от двойного тапа (тап-тап = «весь кадр») убираем из выделения
 function eraseDots() {
-  const c = manCv.getContext('2d'); c.save(); c.globalCompositeOperation = 'destination-out';
-  const now = Date.now();
-  for (const d of dots) { if (now - d.t > 1000) continue; c.beginPath(); c.arc(d.x, d.y, d.r + 2, 0, 7); c.fill(); }
-  c.restore(); dots = []; renderMask();
+  const now = Date.now(); let k = 0;
+  while (k < 2 && strokes.length && strokes[strokes.length - 1].dot && now - strokes[strokes.length - 1].t < 1000) { strokes.pop(); k++; }
+  redrawStrokes();
+}
+function redrawStrokes() {
+  const c = manCv.getContext('2d'); c.clearRect(0, 0, manCv.width, manCv.height);
+  c.fillStyle = c.strokeStyle = '#ff2d2d'; c.lineCap = 'round'; c.lineJoin = 'round';
+  for (const s of strokes) {
+    c.beginPath(); c.arc(s.pts[0][0], s.pts[0][1], s.r, 0, 7); c.fill();
+    if (s.pts.length > 1) { c.lineWidth = s.r * 2; c.beginPath(); c.moveTo(s.pts[0][0], s.pts[0][1]); for (const [x, y] of s.pts) c.lineTo(x, y); c.stroke(); }
+  }
+  renderMask();
 }
 function scheduleAutoErase() {
   if (!S.autoErase || S.mode !== 'brush') return;
-  if (cur() && cur().dets && cur().dets.length) return;   // пока проверяют найденное — ждём кнопку «Стереть»
+  if (cur() && cur().dets && cur().dets.length) return;   // пока проверяют найденное — ждём кнопку «Удалить»
   cancelAutoErase();
   eraseTimer = setTimeout(() => { eraseTimer = null; if (!ptrs.size && !S.busy) runErase(); }, AUTO_ERASE_DELAY);
 }
@@ -233,12 +243,12 @@ function setMode(m) {
   S.mode = m; $('brush').classList.toggle('on', m === 'brush');
   $('brushTools').classList.toggle('on', m === 'brush');
   syncEraseBtn();
-  if (m === 'brush') { if (!(cur() && cur().dets && cur().dets.length)) status(S.autoErase ? 'Закрасьте лишнее — сотрётся само' : 'Закрасьте лишнее и нажмите «Стереть»'); warmup(); }
+  if (m === 'brush') { if (!(cur() && cur().dets && cur().dets.length)) status(S.autoErase ? 'Закрасьте лишнее — удалится само' : 'Выделите лишнее пальцем, затем «Удалить»'); warmup(); }
   else { clearMask(); cancelAutoErase(); }
   setTimeout(() => { if (cur()) fitView(); }, 0);
 }
 function clearMask() {
-  manCv.getContext('2d').clearRect(0, 0, manCv.width, manCv.height); dots = [];
+  manCv.getContext('2d').clearRect(0, 0, manCv.width, manCv.height); strokes = []; strokeRedo = [];
   if (cur()) cur().dets = [];
   renderMask();
 }
@@ -277,7 +287,7 @@ function detAt(x, y) {
 function detStatus() {
   const p = cur(); if (!p || !p.dets) return;
   const on = p.dets.filter((d) => d.on).length;
-  status(on ? `Найдено: ${p.dets.length}, уберу: ${on}. Тап по рамке — оставить. Затем «Стереть»` : 'Всё отмечено «оставить». Можно закрасить кистью или выйти');
+  status(on ? `Найдено: ${p.dets.length}, уберу: ${on}. Тап по рамке — оставить. Затем «Удалить»` : 'Всё отмечено «оставить». Можно закрасить кистью или выйти');
 }
 
 /* ---------- улучшение света и цвета ---------- */
@@ -346,12 +356,22 @@ function enhanceCanvas(cv) {
 
 /* ---------- отмена ---------- */
 async function pushUndoFull(p) {   // целый кадр храним как JPEG (~1 МБ вместо 20)
-  p.undo.push({ blob: await toBlob(p.canvas, 0.95), enh: p.enhanced });
+  p.undo.push({ blob: await toBlob(p.canvas, 0.95), enh: p.enhanced }); p.redo = [];
   trimUndo(p);
 }
 function pushUndoRect(p, x, y, w, h) {
-  p.undo.push({ x, y, data: ctx2d(p.canvas).getImageData(x, y, w, h), enh: p.enhanced });
+  p.undo.push({ x, y, data: ctx2d(p.canvas).getImageData(x, y, w, h), enh: p.enhanced }); p.redo = [];
   trimUndo(p);
+}
+// снимок текущего состояния той же области (для обратного шага)
+async function snapshotLike(p, u) {
+  return u.data ? { x: u.x, y: u.y, data: ctx2d(p.canvas).getImageData(u.x, u.y, u.data.width, u.data.height), enh: p.enhanced }
+    : { blob: await toBlob(p.canvas, 0.95), enh: p.enhanced };
+}
+async function applyEntry(p, u) {
+  if (u.data) ctx2d(p.canvas).putImageData(u.data, u.x, u.y);
+  else { const bmp = await readImage(u.blob); ctx2d(p.canvas).drawImage(bmp, 0, 0, p.canvas.width, p.canvas.height); if (bmp.close) bmp.close(); }
+  p.enhanced = u.enh;
 }
 function trimUndo(p) {
   const budget = 60e6; let sum = 0;
@@ -361,9 +381,25 @@ function trimUndo(p) {
 async function undo() {
   const p = cur(); if (!p || !p.undo.length) return;
   const u = p.undo.pop();
-  if (u.data) ctx2d(p.canvas).putImageData(u.data, u.x, u.y);
-  else { const bmp = await readImage(u.blob); ctx2d(p.canvas).drawImage(bmp, 0, 0, p.canvas.width, p.canvas.height); if (bmp.close) bmp.close(); }
-  p.enhanced = u.enh; renderStrip(p); updateButtons(); status('Отменено');
+  (p.redo = p.redo || []).push(await snapshotLike(p, u));
+  await applyEntry(p, u); renderStrip(p); updateButtons(); status('Шаг назад');
+}
+async function redo() {
+  const p = cur(); if (!p || !p.redo || !p.redo.length) return;
+  const u = p.redo.pop();
+  p.undo.push(await snapshotLike(p, u));
+  await applyEntry(p, u); renderStrip(p); updateButtons(); status('Шаг вперёд');
+}
+// «Назад»/«Вперёд»: сначала мазки текущего выделения, потом изменения фото
+function stepBack() {
+  cancelAutoErase();
+  if (strokes.length) { strokeRedo.push(strokes.pop()); redrawStrokes(); updateButtons(); status(strokes.length ? 'Мазок убран' : 'Выделение пустое'); return; }
+  undo();
+}
+function stepForward() {
+  cancelAutoErase();
+  if (strokeRedo.length) { strokes.push(strokeRedo.pop()); redrawStrokes(); updateButtons(); status('Мазок возвращён'); return; }
+  redo();
 }
 
 /* ---------- LaMa ---------- */
@@ -668,7 +704,8 @@ cmp.addEventListener('contextmenu', (e) => e.preventDefault());
 /* ---------- кнопки и настройки ---------- */
 function updateButtons() {
   const p = cur(), has = !!p, b = S.busy;
-  $('brush').disabled = !has || b; $('cmp').disabled = !has; $('undo').disabled = !has || b || !p.undo.length;
+  $('brush').disabled = !has || b; $('cmp').disabled = !has; $('undo').disabled = !has || b || (!strokes.length && !p.undo.length);
+  $('redo').disabled = !has || b || (!strokeRedo.length && !(p.redo && p.redo.length));
   $('enh').disabled = !has || b || p.enhanced; $('enh').textContent = has && p.enhanced ? 'Улучшено ✓' : 'Улучшить';
   $('save').disabled = !has || b; $('saveAll').disabled = S.photos.length < 2 || b;
   $('doErase').disabled = b; $('clearMask').disabled = b; $('add').disabled = b;
@@ -685,16 +722,18 @@ $('doErase').onclick = () => { S.cancel = false; runErase(); };
 $('auto').onclick = () => { S.cancel = false; autoClean(cur(), true).catch((e) => { busy(false); status('Ошибка: ' + e.message, 'err'); log(e.message); }); };
 $('autoAll').onclick = () => { $('settings').classList.remove('on'); autoCleanMany(S.photos.slice()); };
 $('stop').onclick = () => { S.cancel = true; $('busyText').textContent = 'Останавливаю после текущего шага…'; };
-$('undo').onclick = () => { cancelAutoErase(); undo(); };
+$('undo').onclick = stepBack;
+$('redo').onclick = stepForward;
 $('save').onclick = () => saveFiles([cur()]);
 $('saveAll').onclick = () => saveFiles(S.photos);
 $('gear').onclick = () => $('settings').classList.toggle('on');
 $('groups').innerHTML = GROUPS.map((g) => `<label><input type="checkbox" value="${g.id}"${S.groups.includes(g.id) ? ' checked' : ''}>${g.ru}</label>`).join('');
 $('groups').onchange = () => { S.groups = [...$('groups').querySelectorAll('input:checked')].map((i) => i.value); store.set('groups', S.groups); };
 [['optEnh', 'autoEnh'], ['optErase', 'autoErase'], ['optGpu', 'gpu'], ['optFull', 'fullAuto']].forEach(([id, key]) => {
+  const skey = key === 'autoErase' ? 'autoErase2' : key;
   const el = $(id); el.checked = !!S[key];
   el.onchange = () => {
-    S[key] = el.checked; store.set(key, el.checked);
+    S[key] = el.checked; store.set(skey, el.checked);
     if (key === 'autoErase') { syncEraseBtn(); cancelAutoErase(); }
     if (key === 'gpu' && (S.sess || S.sessP)) status('Перезапустите приложение, чтобы сменить движок');
   };
@@ -702,7 +741,7 @@ $('groups').onchange = () => { S.groups = [...$('groups').querySelectorAll('inpu
 syncEraseBtn();
 updateButtons();
 
-window.__app = { fetchModel, S, addFiles, enhanceCanvas, erase: runErase, select, undo, getSession, parseYolo, autoClean };   // для проверки
+window.__app = { stepBack, stepForward, strokesN: () => strokes.length, fetchModel, S, addFiles, enhanceCanvas, erase: runErase, select, undo, getSession, parseYolo, autoClean };   // для проверки
 
 /* ---------- офлайн и многопоточность ---------- */
 if ('serviceWorker' in navigator && window.isSecureContext && !MOCK) {

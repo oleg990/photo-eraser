@@ -83,7 +83,7 @@
 </header>
 <div id="settings">
   <label><span>Улучшать при добавлении<small>Свет и цвет сразу, без нажатий</small></span><input type="checkbox" id="optEnh"></label>
-  <label><span>Стирать сразу после мазка<small>Отпустили палец — через секунду стирается</small></span><input type="checkbox" id="optErase"></label>
+  <label><span>Удалять сразу после выделения<small>Без кнопки «Удалить»: отпустили палец — через секунду удаляется</small></span><input type="checkbox" id="optErase"></label>
   <label><span>Полностью автоматически<small>При добавлении: улучшить, найти и стереть лишнее без нажатий</small></span><input type="checkbox" id="optFull"></label>
   <div id="groupsBox"><div class="gt">Что убирать автоматически</div><div id="groups"></div></div>
   <button class="b" id="autoAll" style="width:100%;margin:6px 0 4px" disabled>Авто-уборка всех фото сейчас</button>
@@ -109,8 +109,8 @@
   <div id="brushTools">
     <div class="sizeRow"><span>Кисть</span><input id="size" type="range" min="12" max="110" value="40"><span id="sizeVal">40</span></div>
     <div class="row">
-      <button class="b main" id="doErase">Стереть</button>
-      <button class="b" id="clearMask">Сбросить мазки</button>
+      <button class="b main" id="doErase">Удалить</button>
+      <button class="b" id="clearMask">Снять выделение</button>
     </div>
     <div id="hint">Закрашивайте с запасом. Тап по рамке — не убирать этот предмет. Двумя пальцами — приблизить, двойной тап — весь кадр</div>
   </div>
@@ -119,10 +119,13 @@
     <button class="b" id="brush" disabled>Кисть</button>
     <button class="b" id="auto" disabled>Авто</button>
     <button class="b" id="cmp" disabled>До/после</button>
-    <button class="b" id="undo" disabled>Отмена</button>
   </div>
   <div class="row">
+    <button class="b" id="undo" disabled>↶ Назад</button>
+    <button class="b" id="redo" disabled>Вперёд ↷</button>
     <button class="b" id="enh" disabled>Улучшить</button>
+  </div>
+  <div class="row">
     <button class="b main" id="save" disabled>Сохранить</button>
     <button class="b" id="saveAll" disabled>Сохранить все</button>
   </div>
