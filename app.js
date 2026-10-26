@@ -8,6 +8,8 @@ const Q = new URLSearchParams(location.search);
 const MOCK = Q.has('mock');          // режим проверки без модели
 const AUTO_ERASE_DELAY = 900;        // мс после последнего мазка
 const DET_URL = 'models/detector.onnx', DET_CLASSES_URL = 'models/detector_classes.json', DET = 640;
+// пороги уверенности YOLO-World (его оценки обычно 0.1–0.4): показать / отметить «убрать» / полный автомат; для людей ниже
+const THR = { show: 0.07, mark: 0.1, full: 0.14, person: 0.08, maxShown: 12, maxArea: 0.15 };
 // группы для авто-уборки; слова — классы детектора (setup.py --auto экспортирует модель с ними)
 const GROUPS = [
   { id: 'people', ru: 'Люди', words: ['person'] },
@@ -408,7 +410,9 @@ async function ensureOrt() {
   if (self.ort && S.threads) return;
   await loadScript('vendor/ort.min.js');
   S.threads = self.crossOriginIsolated ? clamp(navigator.hardwareConcurrency || 2, 1, 4) : 1;
-  ort.env.wasm.wasmPaths = 'vendor/'; ort.env.wasm.numThreads = S.threads; ort.env.wasm.proxy = false;
+  // полный адрес обязателен, иначе import() внутри движка не найдёт модуль
+  ort.env.wasm.wasmPaths = new URL('vendor/', location.href).href;
+  ort.env.wasm.numThreads = S.threads; ort.env.wasm.proxy = false;
 }
 async function createSession() {
   if (MOCK) { setEngine('заглушка (режим проверки)'); return mockSession(); }
@@ -506,21 +510,34 @@ async function eraseCore(src, label) {
   return { sec, cut };
 }
 
+// соседние предметы стираем за один проход, если вместе они влезают в окно без потери качества
+function clusterJobs(jobs, W, H) {
+  const LIMIT = Math.max(LAMA * 0.75, Math.min(W, H) * 0.16);   // сторона общей рамки, px
+  const box = (rs) => { const x0 = Math.min(...rs.map((r) => r.x)), y0 = Math.min(...rs.map((r) => r.y)), x1 = Math.max(...rs.map((r) => r.x + r.w)), y1 = Math.max(...rs.map((r) => r.y + r.h)); return Math.max(x1 - x0, y1 - y0); };
+  const out = [];
+  for (const j of jobs) {
+    let best = null, bs = Infinity;
+    for (const c of out) { const s = box([...c.rects, ...j.rects]); if (s <= LIMIT && s < bs) { best = c; bs = s; } }
+    if (best) { best.rects.push(...j.rects); if (!best.label.includes(j.label)) best.label += ', ' + j.label; best.n++; } else out.push({ rects: [...j.rects], label: j.label, n: 1 });
+  }
+  return out;
+}
+
 // стирает всё отмеченное: каждый найденный предмет отдельно (так качественнее), затем ручные мазки
 async function eraseAll() {
   const p = cur(); if (!p) return 0;
   cancelAutoErase();
   const W = p.canvas.width, H = p.canvas.height;
-  const jobs = (p.dets || []).filter((d) => d.on).map((d) => ({ rect: detRect(d, W, H), label: d.label }));
+  const jobs = clusterJobs((p.dets || []).filter((d) => d.on).map((d) => ({ rects: [detRect(d, W, H)], label: d.label })), W, H);
   jobs.push({ label: 'закрашенное' });
   const tmp = document.createElement('canvas'); tmp.width = W; tmp.height = H;
   let done = 0, tot = 0, cutAny = false; const n = jobs.length;
   for (let i = 0; i < n; i++) {
     if (S.cancel) break;
     let src = manCv;
-    if (jobs[i].rect) { const c = tmp.getContext('2d'); c.clearRect(0, 0, W, H); c.fillStyle = '#f00'; roundRect(c, jobs[i].rect); c.fill(); src = tmp; }
-    const r = await eraseCore(src, n > 2 ? `Убираю ${i + 1} из ${n - 1}: ${jobs[i].label}…` : 'Убираю…');
-    if (r) { done++; tot += r.sec; cutAny = cutAny || r.cut; }
+    if (jobs[i].rects) { const c = tmp.getContext('2d'); c.clearRect(0, 0, W, H); c.fillStyle = '#f00'; for (const r of jobs[i].rects) { roundRect(c, r); c.fill(); } src = tmp; }
+    const r = await eraseCore(src, n > 2 ? `Убираю, шаг ${i + 1} из ${n - 1}: ${jobs[i].label}…` : 'Убираю…');
+    if (r) { done += jobs[i].n || 1; tot += r.sec; cutAny = cutAny || r.cut; }
   }
   clearMask(); busy(false); renderStrip(p); syncEraseBtn(); updateButtons();
   if (!done) { status(S.cancel ? 'Остановлено' : 'Сначала закрасьте то, что нужно убрать'); return 0; }
@@ -591,13 +608,15 @@ async function detect(p, thr) {
     }).map((d) => ({ ...d, word: D.classes[d.ci] }));
   }
   // отбрасываем крошечные и огромные (скорее всего ошибка: «одежда» на всю кровать и т.п.)
-  return raw.filter((d) => groupOf(d.word) && d.w * d.h > W * H * 0.0008 && d.w * d.h < W * H * 0.35)
+  return raw.filter((d) => groupOf(d.word) && d.w * d.h > W * H * 0.0008 && d.w * d.h < W * H * THR.maxArea)
     .map((d) => { const g = groupOf(d.word); return { x: d.x, y: d.y, w: d.w, h: d.h, score: d.score, group: g.id, label: WORD_RU[d.word] || d.word }; });
 }
 async function autoClean(p, review) {
   busy(true, 'Ищу лишнее…', true); await tick();
-  const dets = await detect(p, review ? 0.2 : 0.3);
-  p.dets = dets.map((d) => ({ ...d, on: S.groups.includes(d.group) }));
+  const dets = (await detect(p, THR.show)).slice(0, THR.maxShown);
+  const need = (d) => (d.group === 'people' ? THR.person : review ? THR.mark : THR.full);
+  p.dets = dets.map((d) => ({ ...d, on: S.groups.includes(d.group) && d.score >= need(d) }));
+  if (!review) p.dets = p.dets.filter((d) => d.on);
   busy(false);
   if (review) {
     if (S.mode !== 'brush') setMode('brush');
@@ -605,7 +624,7 @@ async function autoClean(p, review) {
     if (!p.dets.length) status('Ничего лишнего не нашёл. Можно закрасить кистью'); else detStatus();
     warmup(); return 0;
   }
-  p.dets = p.dets.filter((d) => d.on); renderMask();
+  renderMask();
   if (!p.dets.length) return 0;
   return eraseAll();
 }
